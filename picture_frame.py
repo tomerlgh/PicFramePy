@@ -298,6 +298,10 @@ class PictureFrame(QtWidgets.QWidget):
             frame_x = (self.width() - scaled_frame.width()) // 2
             frame_y = (self.height() - scaled_frame.height()) // 2
             
+            # Draw white background for the frame area to cover any transparent pixels
+            frame_rect = QtCore.QRect(frame_x, frame_y, scaled_frame.width(), scaled_frame.height())
+            p.fillRect(frame_rect, QtGui.QColor(255, 255, 255))
+            
             # Get the calculated photo area for this frame
             current_frame = self.frames[self.current_frame_index]
             if current_frame in self.frame_photo_areas:
