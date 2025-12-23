@@ -106,6 +106,14 @@ class PictureFrame(QtWidgets.QWidget):
         self.folder = Path("C:/Users/tomer.labin/Pictures/PictureFrame")
         self.folder.mkdir(parents=True, exist_ok=True)
 
+        # Frame images
+        self.frames_folder = Path(__file__).parent / "Frames"
+        self.frames = []
+        self.current_frame_index = 0
+        self.use_custom_frame = True
+        self.frame_photo_areas = {}  # Store calculated photo areas for each frame
+        self.load_frames()
+
         self.load_images()
 
         # Slideshow timer
@@ -141,6 +149,116 @@ class PictureFrame(QtWidgets.QWidget):
         self.images = sorted(files)
         self.index = 0
 
+    def load_frames(self):
+        """Load frame images from Frames folder"""
+        if not self.frames_folder.exists():
+            return
+        
+        exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp")
+        files = []
+        for e in exts:
+            files.extend(glob.glob(str(self.frames_folder / e)))
+        
+        self.frames = sorted(files)
+        if not self.frames:
+            self.use_custom_frame = False
+        else:
+            # Calculate transparent area for each frame
+            for frame_path in self.frames:
+                self.calculate_frame_photo_area(frame_path)
+
+    def calculate_frame_photo_area(self, frame_path):
+        """Calculate the transparent/photo area in a frame image"""
+        try:
+            img = Image.open(frame_path)
+            img = img.convert("RGBA")
+            
+            # Get alpha channel
+            alpha = img.split()[-1]
+            bbox = alpha.getbbox()
+            
+            if bbox:
+                # Find the bounding box of non-transparent pixels (the frame)
+                # The transparent area is inside this
+                width, height = img.size
+                
+                # Scan for transparent region from all sides
+                import numpy as np
+                alpha_array = np.array(alpha)
+                
+                # Find rows and columns that are mostly transparent (alpha < 128)
+                transparent_threshold = 250
+                
+                # Find transparent rows (top and bottom)
+                row_transparency = np.mean(alpha_array < transparent_threshold, axis=1)
+                transparent_rows = np.where(row_transparency > 0.5)[0]
+                
+                if len(transparent_rows) > 0:
+                    top = transparent_rows[0]
+                    bottom = transparent_rows[-1]
+                else:
+                    top, bottom = 0, height
+                
+                # Find transparent columns (left and right)
+                col_transparency = np.mean(alpha_array < transparent_threshold, axis=0)
+                transparent_cols = np.where(col_transparency > 0.5)[0]
+                
+                if len(transparent_cols) > 0:
+                    left = transparent_cols[0]
+                    right = transparent_cols[-1]
+                else:
+                    left, right = 0, width
+                
+                # Store as ratio (0-1) of image dimensions
+                self.frame_photo_areas[frame_path] = {
+                    'left_ratio': left / width,
+                    'top_ratio': top / height,
+                    'width_ratio': (right - left) / width,
+                    'height_ratio': (bottom - top) / height
+                }
+            else:
+                # Fallback to 20% border
+                self.frame_photo_areas[frame_path] = {
+                    'left_ratio': 0.2,
+                    'top_ratio': 0.2,
+                    'width_ratio': 0.6,
+                    'height_ratio': 0.6
+                }
+        except Exception as e:
+            print(f"Error calculating frame area for {frame_path}: {e}")
+            # Fallback to 20% border
+            self.frame_photo_areas[frame_path] = {
+                'left_ratio': 0.2,
+                'top_ratio': 0.2,
+                'width_ratio': 0.6,
+                'height_ratio': 0.6
+            }
+
+    def get_current_frame_pixmap(self):
+        """Get the current frame image as a QPixmap"""
+        if not self.use_custom_frame or not self.frames:
+            return None
+        
+        frame_path = self.frames[self.current_frame_index]
+        try:
+            img = Image.open(frame_path)
+            img = img.convert("RGBA")
+            qimg = QtGui.QImage(img.tobytes("raw", "RGBA"), img.width, img.height, QtGui.QImage.Format_RGBA8888)
+            return QtGui.QPixmap.fromImage(qimg)
+        except Exception:
+            return None
+
+    def next_frame(self):
+        """Switch to next frame"""
+        if not self.frames:
+            return
+        self.current_frame_index = (self.current_frame_index + 1) % len(self.frames)
+        # Recalculate if area not yet calculated for this frame
+        current_frame = self.frames[self.current_frame_index]
+        if current_frame not in self.frame_photo_areas:
+            self.calculate_frame_photo_area(current_frame)
+        self.update()
+
     def next_image(self):
         if not self.images:
             return
@@ -167,56 +285,102 @@ class PictureFrame(QtWidgets.QWidget):
     def paintEvent(self, event):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
 
-        rect = self.rect().adjusted(10, 10, -10, -10)
+        frame_pix = self.get_current_frame_pixmap()
+        
+        if frame_pix and self.use_custom_frame:
+            # Using custom frame image
+            # Scale frame to widget size
+            scaled_frame = frame_pix.scaled(self.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+            
+            # Center the frame
+            frame_x = (self.width() - scaled_frame.width()) // 2
+            frame_y = (self.height() - scaled_frame.height()) // 2
+            
+            # Get the calculated photo area for this frame
+            current_frame = self.frames[self.current_frame_index]
+            if current_frame in self.frame_photo_areas:
+                area = self.frame_photo_areas[current_frame]
+                photo_rect = QtCore.QRect(
+                    int(frame_x + scaled_frame.width() * area['left_ratio']),
+                    int(frame_y + scaled_frame.height() * area['top_ratio']),
+                    int(scaled_frame.width() * area['width_ratio']),
+                    int(scaled_frame.height() * area['height_ratio'])
+                )
+            else:
+                # Fallback to 20% border
+                border_ratio = 0.20
+                photo_rect = QtCore.QRect(
+                    int(frame_x + scaled_frame.width() * border_ratio),
+                    int(frame_y + scaled_frame.height() * border_ratio),
+                    int(scaled_frame.width() * (1 - 2 * border_ratio)),
+                    int(scaled_frame.height() * (1 - 2 * border_ratio))
+                )
+            
+            # Draw the photo first
+            pix = self.current_pixmap()
+            if pix:
+                scaled = pix.scaled(photo_rect.size(), QtCore.Qt.KeepAspectRatioByExpanding, QtCore.Qt.SmoothTransformation)
+                x = (scaled.width() - photo_rect.width()) // 2
+                y = (scaled.height() - photo_rect.height()) // 2
+                crop = scaled.copy(x, y, photo_rect.width(), photo_rect.height())
+                p.drawPixmap(photo_rect.topLeft(), crop)
+            
+            # Draw the frame on top
+            p.drawPixmap(frame_x, frame_y, scaled_frame)
+            
+        else:
+            # Original painted frame
+            rect = self.rect().adjusted(10, 10, -10, -10)
 
-        # Shadow
-        shadow_color = QtGui.QColor(0, 0, 0, 120)
-        p.setBrush(shadow_color)
-        p.setPen(QtCore.Qt.NoPen)
-        p.drawRoundedRect(rect.translated(6, 8), 20, 20)
+            # Shadow
+            shadow_color = QtGui.QColor(0, 0, 0, 120)
+            p.setBrush(shadow_color)
+            p.setPen(QtCore.Qt.NoPen)
+            p.drawRoundedRect(rect.translated(6, 8), 20, 20)
 
-        # Outer "wood" frame gradient
-        wood = QtGui.QLinearGradient(rect.topLeft(), rect.bottomRight())
-        wood.setColorAt(0.0, QtGui.QColor("#7A4B2A"))
-        wood.setColorAt(0.35, QtGui.QColor("#B07A46"))
-        wood.setColorAt(1.0, QtGui.QColor("#6A3F22"))
+            # Outer "wood" frame gradient
+            wood = QtGui.QLinearGradient(rect.topLeft(), rect.bottomRight())
+            wood.setColorAt(0.0, QtGui.QColor("#7A4B2A"))
+            wood.setColorAt(0.35, QtGui.QColor("#B07A46"))
+            wood.setColorAt(1.0, QtGui.QColor("#6A3F22"))
 
-        p.setBrush(wood)
-        p.setPen(QtCore.Qt.NoPen)
-        p.drawRoundedRect(rect, 20, 20)
+            p.setBrush(wood)
+            p.setPen(QtCore.Qt.NoPen)
+            p.drawRoundedRect(rect, 20, 20)
 
-        # Inner bevel
-        inner = rect.adjusted(16, 16, -16, -16)
-        bevel_pen = QtGui.QPen(QtGui.QColor(255, 255, 255, 80), 2)
-        p.setPen(bevel_pen)
-        p.setBrush(QtCore.Qt.NoBrush)
-        p.drawRoundedRect(inner, 14, 14)
+            # Inner bevel
+            inner = rect.adjusted(16, 16, -16, -16)
+            bevel_pen = QtGui.QPen(QtGui.QColor(255, 255, 255, 80), 2)
+            p.setPen(bevel_pen)
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawRoundedRect(inner, 14, 14)
 
-        # Matte
-        matte = inner.adjusted(10, 10, -10, -10)
-        p.setPen(QtCore.Qt.NoPen)
-        p.setBrush(QtGui.QColor("#F2EFE6"))
-        p.drawRoundedRect(matte, 10, 10)
+            # Matte
+            matte = inner.adjusted(10, 10, -10, -10)
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor("#F2EFE6"))
+            p.drawRoundedRect(matte, 10, 10)
 
-        # Photo area
-        photo_rect = matte.adjusted(10, 10, -10, -10)
-        p.setBrush(QtGui.QColor("#111111"))
-        p.drawRoundedRect(photo_rect, 8, 8)
+            # Photo area
+            photo_rect = matte.adjusted(10, 10, -10, -10)
+            p.setBrush(QtGui.QColor("#111111"))
+            p.drawRoundedRect(photo_rect, 8, 8)
 
-        pix = self.current_pixmap()
-        if pix:
-            # Scale and crop to fill
-            scaled = pix.scaled(photo_rect.size(), QtCore.Qt.KeepAspectRatioByExpanding, QtCore.Qt.SmoothTransformation)
-            x = (scaled.width() - photo_rect.width()) // 2
-            y = (scaled.height() - photo_rect.height()) // 2
-            crop = scaled.copy(x, y, photo_rect.width(), photo_rect.height())
+            pix = self.current_pixmap()
+            if pix:
+                # Scale and crop to fill
+                scaled = pix.scaled(photo_rect.size(), QtCore.Qt.KeepAspectRatioByExpanding, QtCore.Qt.SmoothTransformation)
+                x = (scaled.width() - photo_rect.width()) // 2
+                y = (scaled.height() - photo_rect.height()) // 2
+                crop = scaled.copy(x, y, photo_rect.width(), photo_rect.height())
 
-            # Clip to rounded rect
-            path = QtGui.QPainterPath()
-            path.addRoundedRect(QtCore.QRectF(photo_rect), 8, 8)
-            p.setClipPath(path)
-            p.drawPixmap(photo_rect.topLeft(), crop)
+                # Clip to rounded rect
+                path = QtGui.QPainterPath()
+                path.addRoundedRect(QtCore.QRectF(photo_rect), 8, 8)
+                p.setClipPath(path)
+                p.drawPixmap(photo_rect.topLeft(), crop)
 
         # Resize grip
         grip_rect = QtCore.QRect(self.width() - 28, self.height() - 28, 18, 18)
@@ -275,6 +439,14 @@ class PictureFrame(QtWidgets.QWidget):
         act_folder = menu.addAction("Set pictures folder...")
 
         menu.addSeparator()
+        
+        # Frame options
+        if self.frames:
+            act_next_frame = menu.addAction("Next frame")
+            act_use_frame = menu.addAction("Use custom frame")
+            act_use_frame.setCheckable(True)
+            act_use_frame.setChecked(self.use_custom_frame)
+            menu.addSeparator()
 
         act_top = menu.addAction("Always on top")
         act_top.setCheckable(True)
@@ -301,6 +473,13 @@ class PictureFrame(QtWidgets.QWidget):
 
         if action == act_next:
             self.next_image()
+
+        elif self.frames and action == act_next_frame:
+            self.next_frame()
+        
+        elif self.frames and action == act_use_frame:
+            self.use_custom_frame = act_use_frame.isChecked()
+            self.update()
 
         elif action == act_folder:
             folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose picture folder", str(self.folder))
